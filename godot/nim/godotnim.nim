@@ -242,7 +242,10 @@ template registerClass*(T: typedesc; godotClassName: string or cstring,
     classRegistry = newTable[FNV1Hash, ObjectInfo]()
   let constructor = proc(): NimGodotObject =
     var t: T
-    new(t, nimGodotObjectFinalizer[T])
+    when defined(gcDestructors):
+      new(t)
+    else:
+      new(t, nimGodotObjectFinalizer[T])
     result = t
 
   const base = baseNativeType(T)
@@ -424,7 +427,10 @@ proc gdnew*[T: NimGodotObject](): T =
   const objInfo = classRegistryStatic[fnv1Hash(godotName)]
   when objInfo.isNative:
     let godotObject = getClassConstructor(cGodotName)()
-    new(result, nimGodotObjectFinalizer[T])
+    when defined(gcDestructors):
+      new(result)
+    else:
+      new(result, nimGodotObjectFinalizer[T])
     result.godotObject = godotObject
     when objInfo.isRef:
       godotObject.initRef()
@@ -879,20 +885,21 @@ proc getNativeLibHandle*(): pointer =
 proc godot_nativescript_init(handle: pointer) {.
     cdecl, exportc, dynlib.} =
   nativeLibHandle = handle
-
-  var stackBottom {.volatile.}: pointer
-  stackBottom = addr(stackBottom)
   {.emit: """
     NimMain();
   """.}
-  when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
-    {.emit: """
-      setStackBottom((void*)(&`stackBottom`));
-    """.}
-  else:
-    nimGC_setStackBottom(stackBottom)
-  GC_fullCollect()
-  GC_disable()
+  when not defined(gcDestructors):
+    var stackBottom {.volatile.}: pointer
+    stackBottom = addr(stackBottom)
+    when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
+      {.emit: """
+        setStackBottom((void*)(&`stackBottom`));
+      """.}
+    else:
+      nimGC_setStackBottom(stackBottom)
+    GC_fullCollect()
+    when defined(useRealtimeGC):
+      GC_disable()
 
 proc godot_gdnative_init(options: ptr GDNativeInitOptions) {.
     cdecl, exportc, dynlib.} =
@@ -901,8 +908,9 @@ proc godot_gdnative_init(options: ptr GDNativeInitOptions) {.
 
 proc godot_gdnative_terminate(options: ptr GDNativeTerminateOptions) {.
     cdecl, exportc, dynlib.} =
-  if not options[].inEditor or not compileOption("threads"):
-    deallocHeap(runFinalizers = not options[].inEditor, allowGcAfterwards = false)
+  when not defined(gcDestructors):
+    if not options[].inEditor or not compileOption("threads"):
+      deallocHeap(runFinalizers = not options[].inEditor, allowGcAfterwards = false)
 
 const nimGcStepLengthUs {.intdefine.} = 2000
 
@@ -925,17 +933,19 @@ proc registerFrameCallback*(cb: proc () {.closure.}) =
 {.push stackTrace: off.}
 
 proc godot_nativescript_frame() {.cdecl, exportc, dynlib.} =
-  var stackBottom {.volatile.}: pointer
-  stackBottom = addr(stackBottom)
-  when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
-    {.emit: """
-      setStackBottom((void*)(&`stackBottom`));
-    """.}
-  else:
-    nimGC_setStackBottom(stackBottom)
-  for cb in idleCallbacks:
-    cb()
-  GC_step(nimGcStepLengthUs, true, 0)
+  when not defined(gcDestructors):
+    var stackBottom {.volatile.}: pointer
+    stackBottom = addr(stackBottom)
+    when (NimMajor, NimMinor, NimPatch) < (0, 19, 0):
+      {.emit: """
+        setStackBottom((void*)(&`stackBottom`));
+      """.}
+    else:
+      nimGC_setStackBottom(stackBottom)
+    for cb in idleCallbacks:
+      cb()
+    when defined(useRealtimeGC):
+      GC_step(nimGcStepLengthUs, true, 0)
 
 when not defined(release):
   onUnhandledException = proc(errorMsg: string) =
